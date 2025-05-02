@@ -1,56 +1,42 @@
-from flask import Flask, request, jsonify
-import cv2
-import numpy as np
-from numpy.linalg import norm
-import insightface
 import os
+from flask import Flask, request, jsonify, send_file
+from PIL import Image
+import torch
+from diffusers import StableDiffusionInpaintPipeline
+from io import BytesIO
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# تهيئة نموذج InsightFace
-face_model = insightface.app.FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_model.prepare(ctx_id=0)
+# تحميل النموذج مرة واحدة
+pipe = StableDiffusionInpaintPipeline.from_pretrained("runwayml/stable-diffusion-inpainting")
+pipe = pipe.to("cuda" if torch.cuda.is_available() else "cpu")
 
-def cosine_similarity(a, b):
-    return np.dot(a, b) / (norm(a) * norm(b))
+@app.route("/", methods=["GET"])
+def home():
+    return "PromptDresser API is running!"
 
-@app.route('/verify', methods=['POST'])
-def verify_faces():
-    if 'image1' not in request.files or 'image2' not in request.files:
-        return jsonify({'error': 'يرجى رفع صورتين باسم image1 و image2'}), 400
+@app.route("/generate", methods=["POST"])
+def generate_image():
+    person_img = request.files.get("person")
+    cloth_img = request.files.get("cloth")
+    prompt = request.form.get("prompt", "A fashionable outfit")
 
-    img1_file = request.files['image1']
-    img2_file = request.files['image2']
+    if not person_img or not cloth_img:
+        return jsonify({"error": "Both 'person' and 'cloth' images are required."}), 400
 
-    path1 = os.path.join(app.config['UPLOAD_FOLDER'], img1_file.filename)
-    path2 = os.path.join(app.config['UPLOAD_FOLDER'], img2_file.filename)
-    img1_file.save(path1)
-    img2_file.save(path2)
+    person_image = Image.open(person_img).convert("RGB")
+    cloth_image = Image.open(cloth_img).convert("RGB")
 
-    img1 = cv2.imread(path1)
-    img2 = cv2.imread(path2)
+    # التوليد باستخدام النموذج
+    result = pipe(prompt=prompt, image=person_image, mask_image=cloth_image).images[0]
 
-    if img1 is None or img2 is None:
-        return jsonify({'error': 'فشل في تحميل الصور'}), 400
+    # تحويل الصورة إلى ملف لإرسالها
+    buffer = BytesIO()
+    result.save(buffer, format="PNG")
+    buffer.seek(0)
 
-    faces1 = face_model.get(img1)
-    faces2 = face_model.get(img2)
+    return send_file(buffer, mimetype='image/png')
 
-    if len(faces1) == 0 or len(faces2) == 0:
-        return jsonify({'error': 'وجه غير مكتشف في إحدى الصور'}), 400
-
-    emb1 = faces1[0].embedding
-    emb2 = faces2[0].embedding
-
-    similarity = cosine_similarity(emb1, emb2)
-    result = similarity > 0.5
-
-    return jsonify({
-        'similarity': float(similarity),
-        'same_person': result
-    })
-
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
